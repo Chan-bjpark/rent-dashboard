@@ -100,6 +100,10 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
 .empty { text-align:center; padding:40px; color:#484f58; }
 .empty h3 { color:#8b949e; margin-bottom:8px; }
 
+/* Built year buttons */
+.built-yr-btn { flex:1; padding:5px 0; background:#21262d; border:1px solid #30363d; border-radius:6px; color:#8b949e; font-size:0.8rem; cursor:pointer; }
+.built-yr-btn:hover { background:#30363d; color:#58a6ff; border-color:#58a6ff; }
+
 /* Recent dropdown */
 .recent-dropdown {
   position:absolute; top:100%; left:0; right:0; z-index:10;
@@ -222,6 +226,11 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
           <input type="number" id="builtMin" value="1990" style="width:48%">
           <span>~</span>
           <input type="number" id="builtMax" value="2026" style="width:48%">
+        </div>
+        <div style="display:flex; gap:6px; margin-top:8px;">
+          <button class="built-yr-btn" onclick="setBuiltYear(1)">1년</button>
+          <button class="built-yr-btn" onclick="setBuiltYear(3)">3년</button>
+          <button class="built-yr-btn" onclick="setBuiltYear(5)">5년</button>
         </div>
       </div>
     </div>
@@ -389,6 +398,22 @@ function showRecentDropdown() {
   dd.classList.remove('hidden');
 }
 
+// ── Safe JSON fetch helper ───────────────────────────────────────
+async function safeFetchJson(url, options) {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    console.error('Expected JSON but got:', text.substring(0, 200));
+    throw new Error('서버 응답 오류 (JSON이 아닌 응답). 잠시 후 다시 시도해주세요.');
+  }
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error || `서버 오류 (${res.status})`);
+  }
+  return res.json();
+}
+
 // ── Init ───────────────────────────────────────────────────────
 let map, marker, circle, searchMarkers = [];
 
@@ -419,8 +444,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── Region fallback ────────────────────────────────────────────
 async function loadRegions() {
-  const res = await fetch('/api/regions');
-  const data = await res.json();
+  const data = await safeFetchJson('/api/regions');
   const sel = document.getElementById('directRegion');
   Object.keys(data).sort().forEach(name => {
     const opt = document.createElement('option');
@@ -485,8 +509,7 @@ async function doSearch() {
   document.getElementById('searchBtn').textContent = '검색 중...';
 
   try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    const data = await res.json();
+    const data = await safeFetchJson(`/api/search?q=${encodeURIComponent(q)}`);
     showSearchResults(data.results || []);
   } catch (e) {
     alert('검색 오류: ' + e.message);
@@ -584,10 +607,7 @@ async function fetchRentData() {
 
   try {
     const url = `/api/rent?lat=${S.lat}&lng=${S.lng}&types=${types}&months=${months}&radius=${radius}`;
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (data.error) { alert(data.error); return; }
+    const data = await safeFetchJson(url);
 
     S.rawData = data.data || [];
     S.stats = data.stats || {};
@@ -625,8 +645,7 @@ async function fetchDirect() {
 
   showLoading(true);
   try {
-    const res = await fetch(`/api/rent_direct?code=${code}&types=${types}&months=${months}`);
-    const data = await res.json();
+    const data = await safeFetchJson(`/api/rent_direct?code=${code}&types=${types}&months=${months}`);
     S.rawData = data.data || [];
     applyLocalFilters();
     document.getElementById('lastUpdate').textContent = '조회: ' + new Date().toLocaleString('ko-KR');
@@ -861,6 +880,13 @@ function renderTable() {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
+function setBuiltYear(years) {
+  const now = new Date().getFullYear();
+  document.getElementById('builtMin').value = now - years;
+  document.getElementById('builtMax').value = now;
+  applyLocalFilters();
+}
+
 function showLoading(show) {
   document.getElementById('loadingArea').classList.toggle('hidden', !show);
   if (show) document.getElementById('resultsArea').classList.add('hidden');
@@ -927,6 +953,7 @@ async function exportSlides() {
         filters,
       }),
     });
+    if (!resp.ok) throw new Error(`서버 오류 (${resp.status})`);
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
@@ -945,6 +972,7 @@ async function exportExcel() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ data: S.filtered }),
     });
+    if (!resp.ok) throw new Error(`서버 오류 (${resp.status})`);
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;

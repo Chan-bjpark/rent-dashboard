@@ -21,6 +21,16 @@ load_dotenv()
 
 app = Flask(__name__)
 
+
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify({"error": f"서버 내부 오류: {e}"}), 500
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({"error": str(e)}), 500
+
 # ── Config ────────────────────────────────────────────────────────
 DATA_KEY = os.environ.get("DATA_GO_KR_KEY", "")
 KAKAO_REST = os.environ.get("KAKAO_REST_KEY", "")
