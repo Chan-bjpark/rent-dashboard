@@ -1,0 +1,6 @@
+flask
+requests
+python-dotenv
+gunicorn
+python-pptx
+openpyxl
