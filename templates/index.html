@@ -100,6 +100,12 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
 .empty { text-align:center; padding:40px; color:#484f58; }
 .empty h3 { color:#8b949e; margin-bottom:8px; }
 
+/* Chart bin buttons */
+.chart-bin-btns { display:flex; gap:4px; }
+.bin-btn { padding:3px 10px; background:#21262d; border:1px solid #30363d; border-radius:5px; color:#8b949e; font-size:0.72rem; cursor:pointer; }
+.bin-btn:hover { border-color:#58a6ff; color:#58a6ff; }
+.bin-btn.active { background:#0d419d; border-color:#58a6ff; color:#58a6ff; }
+
 /* Built year buttons */
 .built-yr-btn { flex:1; padding:5px 0; background:#21262d; border:1px solid #30363d; border-radius:6px; color:#8b949e; font-size:0.8rem; cursor:pointer; }
 .built-yr-btn:hover { background:#30363d; color:#58a6ff; border-color:#58a6ff; }
@@ -277,19 +283,23 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
 
     <!-- Charts -->
     <div class="card">
-      <h2>월세 분포 차트</h2>
+      <h2 style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">월세 분포
+        <div class="chart-bin-btns">
+          <button class="bin-btn active" onclick="setRentBin(10, this)">10만</button>
+          <button class="bin-btn" onclick="setRentBin(20, this)">20만</button>
+        </div>
+      </h2>
       <div class="chart-wrap">
-        <div class="chart-box"><canvas id="chartUnder30"></canvas></div>
-        <div class="chart-box"><canvas id="chartOver30"></canvas></div>
+        <div class="chart-box"><canvas id="chartRent"></canvas></div>
+        <div class="chart-box"><canvas id="chartDep"></canvas></div>
       </div>
-    </div>
-
-    <div class="card">
-      <h2>보증금 분포 차트</h2>
-      <div class="chart-wrap">
-        <div class="chart-box"><canvas id="chartDepUnder30"></canvas></div>
-        <div class="chart-box"><canvas id="chartDepOver30"></canvas></div>
-      </div>
+      <h2 style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:6px;">보증금 분포
+        <div class="chart-bin-btns">
+          <button class="bin-btn" onclick="setDepBin(100, this)">100만</button>
+          <button class="bin-btn active" onclick="setDepBin(500, this)">500만</button>
+          <button class="bin-btn" onclick="setDepBin(1000, this)">1000만</button>
+        </div>
+      </h2>
     </div>
 
     <!-- Breakdown -->
@@ -763,77 +773,61 @@ function renderStatsGrid(stats) {
 }
 
 // ── Charts ─────────────────────────────────────────────────────
+let rentBinSize = 10, depBinSize = 500;
+
+function setRentBin(size, btn) {
+  rentBinSize = size;
+  btn.parentElement.querySelectorAll('.bin-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderCharts(S.filtered);
+}
+function setDepBin(size, btn) {
+  depBinSize = size;
+  btn.parentElement.querySelectorAll('.bin-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderCharts(S.filtered);
+}
+
+function buildHistFixed(values, binSize, unit) {
+  if (!values.length) return { labels: [], values: [] };
+  const binsMap = {};
+  values.forEach(v => { const b = Math.floor(v / binSize) * binSize; binsMap[b] = (binsMap[b] || 0) + 1; });
+  const keys = Object.keys(binsMap).map(Number).sort((a,b) => a - b);
+  if (unit === '천') {
+    return { labels: keys.map(k => `${(k/1000).toFixed(0)}~${((k+binSize)/1000).toFixed(0)}천`), values: keys.map(k => binsMap[k]) };
+  }
+  return { labels: keys.map(k => `${k}~${k+binSize}`), values: keys.map(k => binsMap[k]) };
+}
+
+function makeBarChart(canvasId, title, hist, color, borderColor) {
+  if (!hist.labels.length) return;
+  S.charts[canvasId] = new Chart(document.getElementById(canvasId), {
+    type: 'bar',
+    data: { labels: hist.labels, datasets: [{ label: '건수', data: hist.values,
+      backgroundColor: color, borderColor: borderColor, borderWidth: 1 }] },
+    options: {
+      responsive: true,
+      plugins: { title: { display: true, text: title, color: '#8b949e' }, legend: { display: false } },
+      scales: { x: { ticks: { color: '#484f58', maxRotation: 45 }, grid: { color: '#21262d' } },
+               y: { ticks: { color: '#484f58' }, grid: { color: '#21262d' } } },
+    },
+  });
+}
+
 function renderCharts(data) {
   Object.values(S.charts).forEach(c => c.destroy());
   S.charts = {};
 
-  const monthly = data.filter(d => d.monthly_rent > 0);
-  if (!monthly.length) return;
+  const rents = data.filter(d => d.monthly_rent > 0).map(d => d.monthly_rent);
+  const deps = data.map(d => d.deposit);
 
-  const under30 = monthly.filter(d => d.area < 30).map(d => d.monthly_rent);
-  const over30 = monthly.filter(d => d.area >= 30).map(d => d.monthly_rent);
+  // 월세 분포
+  const rentHist = buildHistFixed(rents, rentBinSize, '만');
+  makeBarChart('chartRent', `월세 분포 — ${rentBinSize}만 단위 (${rents.length}건)`, rentHist, 'rgba(88,166,255,0.6)', '#58a6ff');
 
-  function buildHist(rents) {
-    if (!rents.length) return { labels: [], values: [] };
-    const maxR = Math.max(...rents);
-    const binSize = maxR > 200 ? 20 : maxR > 100 ? 10 : 5;
-    const binsMap = {};
-    rents.forEach(r => { const b = Math.floor(r / binSize) * binSize; binsMap[b] = (binsMap[b] || 0) + 1; });
-    const keys = Object.keys(binsMap).map(Number).sort((a,b) => a - b);
-    return { labels: keys.map(k => `${k}~${k+binSize}`), values: keys.map(k => binsMap[k]) };
-  }
-
-  function makeChart(canvasId, title, rents, color, borderColor) {
-    const h = buildHist(rents);
-    if (!h.labels.length) return;
-    S.charts[canvasId] = new Chart(document.getElementById(canvasId), {
-      type: 'bar',
-      data: { labels: h.labels, datasets: [{ label: '건수', data: h.values,
-        backgroundColor: color, borderColor: borderColor, borderWidth: 1 }] },
-      options: {
-        responsive: true,
-        plugins: { title: { display: true, text: `${title} (${rents.length}건)`, color: '#8b949e' }, legend: { display: false } },
-        scales: { x: { ticks: { color: '#484f58', maxRotation: 45 }, grid: { color: '#21262d' } },
-                 y: { ticks: { color: '#484f58' }, grid: { color: '#21262d' } } },
-      },
-    });
-  }
-
-  makeChart('chartUnder30', '30㎡ 미만 월세 분포 (만원)', under30, 'rgba(88,166,255,0.6)', '#58a6ff');
-  makeChart('chartOver30', '30㎡ 이상 월세 분포 (만원)', over30, 'rgba(188,140,255,0.6)', '#bc8cff');
-
-  // 보증금 분포 차트
-  const depUnder30 = data.filter(d => d.area < 30).map(d => d.deposit);
-  const depOver30 = data.filter(d => d.area >= 30).map(d => d.deposit);
-
-  function buildDepHist(deps) {
-    if (!deps.length) return { labels: [], values: [] };
-    const maxD = Math.max(...deps);
-    const binSize = maxD > 50000 ? 5000 : maxD > 10000 ? 2000 : maxD > 5000 ? 1000 : 500;
-    const binsMap = {};
-    deps.forEach(d => { const b = Math.floor(d / binSize) * binSize; binsMap[b] = (binsMap[b] || 0) + 1; });
-    const keys = Object.keys(binsMap).map(Number).sort((a,b) => a - b);
-    return { labels: keys.map(k => `${(k/1000).toFixed(0)}~${((k+binSize)/1000).toFixed(0)}천`), values: keys.map(k => binsMap[k]) };
-  }
-
-  function makeDepChart(canvasId, title, deps, color, borderColor) {
-    const h = buildDepHist(deps);
-    if (!h.labels.length) return;
-    S.charts[canvasId] = new Chart(document.getElementById(canvasId), {
-      type: 'bar',
-      data: { labels: h.labels, datasets: [{ label: '건수', data: h.values,
-        backgroundColor: color, borderColor: borderColor, borderWidth: 1 }] },
-      options: {
-        responsive: true,
-        plugins: { title: { display: true, text: `${title} (${deps.length}건)`, color: '#8b949e' }, legend: { display: false } },
-        scales: { x: { ticks: { color: '#484f58', maxRotation: 45 }, grid: { color: '#21262d' } },
-                 y: { ticks: { color: '#484f58' }, grid: { color: '#21262d' } } },
-      },
-    });
-  }
-
-  makeDepChart('chartDepUnder30', '30㎡ 미만 보증금 분포 (만원)', depUnder30, 'rgba(63,185,80,0.6)', '#3fb950');
-  makeDepChart('chartDepOver30', '30㎡ 이상 보증금 분포 (만원)', depOver30, 'rgba(210,153,34,0.6)', '#d29922');
+  // 보증금 분포
+  const depHist = buildHistFixed(deps, depBinSize, '천');
+  makeBarChart('chartDep', `보증금 분포 — ${depBinSize >= 1000 ? (depBinSize/1000)+'천' : depBinSize}만 단위 (${deps.length}건)`, depHist, 'rgba(63,185,80,0.6)', '#3fb950');
 }
 
 // ── Breakdowns ─────────────────────────────────────────────────
