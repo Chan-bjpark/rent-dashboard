@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: rent-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    envVars:
+      - key: DATA_GO_KR_KEY
+        sync: false
+      - key: KAKAO_REST_KEY
+        sync: false
+      - key: KAKAO_JS_KEY
+        sync: false
