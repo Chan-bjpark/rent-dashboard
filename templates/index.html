@@ -148,7 +148,7 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
 
   <!-- Map -->
   <div class="card">
-    <h2>지도</h2>
+    <h2>지도 <span style="font-size:0.7rem; color:#484f58; font-weight:normal; margin-left:8px;">지도를 클릭하여 위치를 직접 선택할 수 있습니다</span></h2>
     <div id="map">
       {% if kakao_js_key %}
         지도 로딩 중...
@@ -401,7 +401,7 @@ function showRecentDropdown() {
 }
 
 // ── Init ───────────────────────────────────────────────────────
-let map, marker, circle;
+let map, marker, circle, searchMarkers = [];
 const hasKakao = typeof kakao !== 'undefined' && kakao.maps;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -410,6 +410,23 @@ document.addEventListener('DOMContentLoaded', () => {
       map = new kakao.maps.Map(document.getElementById('map'), {
         center: new kakao.maps.LatLng(37.5665, 126.9780),
         level: 5,
+      });
+      // 지도 클릭 → 위치 선택
+      kakao.maps.event.addListener(map, 'click', async (mouseEvent) => {
+        const latlng = mouseEvent.latLng;
+        const lat = latlng.getLat();
+        const lng = latlng.getLng();
+        // 역지오코딩으로 주소 가져오기
+        const geocoder = new kakao.maps.services.Geocoder();
+        geocoder.coord2Address(lng, lat, (result, status) => {
+          let name = '선택한 위치';
+          let address = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+          if (status === kakao.maps.services.Status.OK && result[0]) {
+            address = result[0].address?.address_name || address;
+            name = result[0].address?.region_3depth_name || name;
+          }
+          selectLocation({ name, address, lat, lng });
+        });
       });
     });
     document.getElementById('directSelect').classList.add('hidden');
@@ -498,22 +515,49 @@ async function doSearch() {
   }
 }
 
+function clearSearchMarkers() {
+  searchMarkers.forEach(m => m.setMap(null));
+  searchMarkers = [];
+}
+
 function showSearchResults(results) {
   const ul = document.getElementById('searchResults');
   ul.innerHTML = '';
   ul.classList.remove('hidden');
+  clearSearchMarkers();
 
   if (!results.length) {
     ul.innerHTML = '<li style="color:#484f58;">검색 결과가 없습니다</li>';
     return;
   }
 
-  results.forEach(r => {
+  const bounds = hasKakao && map ? new kakao.maps.LatLngBounds() : null;
+
+  results.forEach((r, i) => {
     const li = document.createElement('li');
-    li.innerHTML = `<div>${r.name}</div><div class="addr">${r.address}</div>`;
-    li.addEventListener('click', () => selectLocation(r));
+    li.innerHTML = `<div><span style="color:#58a6ff;margin-right:6px;">${i+1}</span>${r.name}</div><div class="addr">${r.address}</div>`;
+    li.addEventListener('click', () => { clearSearchMarkers(); selectLocation(r); });
+    li.addEventListener('mouseenter', () => { if (hasKakao && searchMarkers[i]) searchMarkers[i].setZIndex(10); });
     ul.appendChild(li);
+
+    // 지도에 번호 마커 표시
+    if (hasKakao && map && r.lat && r.lng) {
+      const pos = new kakao.maps.LatLng(r.lat, r.lng);
+      bounds.extend(pos);
+      const content = `<div style="background:#58a6ff;color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer;">${i+1}</div>`;
+      const overlay = new kakao.maps.CustomOverlay({ position: pos, content, map, yAnchor: 1 });
+      kakao.maps.event.addListener(overlay, 'click', () => { clearSearchMarkers(); selectLocation(r); });
+      // 클릭 가능하게 별도 마커 추가
+      const clickMarker = new kakao.maps.Marker({ position: pos, map, opacity: 0 });
+      kakao.maps.event.addListener(clickMarker, 'click', () => { clearSearchMarkers(); selectLocation(r); });
+      searchMarkers.push(overlay, clickMarker);
+    }
   });
+
+  // 모든 검색 결과가 보이도록 지도 범위 조정
+  if (bounds && searchMarkers.length > 0) {
+    map.setBounds(bounds, 80);
+  }
 }
 
 function selectLocation(loc) {
@@ -531,6 +575,7 @@ function selectLocation(loc) {
   document.getElementById('fetchBtn').disabled = false;
 
   if (hasKakao && map) {
+    clearSearchMarkers();
     const pos = new kakao.maps.LatLng(loc.lat, loc.lng);
     map.setCenter(pos);
     map.setLevel(5);
