@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --timeout 120 --workers 2 app:app
     envVars:
       - key: DATA_GO_KR_KEY
         value: 63dc35a550a08bb881be54f927f132a48329d014924e6ff3998a84a239404f07

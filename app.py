@@ -3,6 +3,7 @@
 
 import io
 import os, math, json, time, re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import xml.etree.ElementTree as ET
 from flask import Flask, render_template, jsonify, request as req, send_file
@@ -352,14 +353,17 @@ def api_rent():
     sido = region.get("region_1depth_name", "")
     sigungu = region.get("region_2depth_name", "")
 
-    # 인접 시군구 체크 (반경 경계)
+    # 인접 시군구 체크 (반경 경계) — 병렬
     codes = {code}
-    for bearing in [0, 90, 180, 270]:
+    def _check_bearing(bearing):
         dlat = radius / 111.0 * math.cos(math.radians(bearing))
         dlng = radius / (111.0 * math.cos(math.radians(lat))) * math.sin(math.radians(bearing))
-        br = kakao_coord2region(lng + dlng, lat + dlat)
-        if br:
-            codes.add(br.get("code", "")[:5])
+        return kakao_coord2region(lng + dlng, lat + dlat)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for br in ex.map(_check_bearing, [0, 90, 180, 270]):
+            if br:
+                codes.add(br.get("code", "")[:5])
     codes.discard("")
 
     # 2) 최근 N개월
@@ -369,23 +373,34 @@ def api_rent():
         dt = now - timedelta(days=30 * i)
         yms.add(dt.strftime("%Y%m"))
 
-    # 3) API 호출
-    all_data = []
+    # 3) API 호출 — 병렬
+    tasks = []
     for c in codes:
         for pt in ptypes:
             pt = pt.strip()
             if pt not in MOLIT:
                 continue
             for ym in sorted(yms, reverse=True):
-                all_data.extend(fetch_molit(pt, c, ym))
+                tasks.append((pt, c, ym))
 
-    # 4) 법정동별 좌표 → 거리 필터
+    all_data = []
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(fetch_molit, pt, c, ym) for pt, c, ym in tasks]
+        for f in as_completed(futures):
+            all_data.extend(f.result())
+
+    # 4) 법정동별 좌표 → 거리 필터 — 병렬
     dong_coords = {}
     unique_dongs = {d["dong"] for d in all_data if d["dong"]}
-    for dong in unique_dongs:
+
+    def _geo_dong(dong):
         coords = geocode_dong(sido, sigungu, dong)
-        if coords:
-            dong_coords[dong] = coords
+        return dong, coords
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for dong, coords in ex.map(_geo_dong, unique_dongs):
+            if coords:
+                dong_coords[dong] = coords
 
     filtered = []
     for rec in all_data:
