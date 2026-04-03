@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: rent-dashboard
+    name: rent-dashboard-kr-bjpark
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
