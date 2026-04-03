@@ -5,9 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>월세 시세 분석 대시보드</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-{% if kakao_js_key %}
-<script src="//dapi.kakao.com/v2/maps/sdk.js?appkey={{ kakao_js_key }}&libraries=services"></script>
-{% endif %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family: -apple-system, 'Pretendard', sans-serif; background:#0d1117; color:#c9d1d9; min-height:100vh; }
@@ -36,8 +35,7 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
 .search-results li .addr { color:#484f58; font-size:0.8rem; margin-top:2px; }
 
 /* Map */
-#map { width:100%; height:350px; border-radius:8px; background:#21262d; display:flex; align-items:center; justify-content:center; color:#484f58; }
-.no-map-msg { text-align:center; padding:40px; color:#484f58; font-size:0.9rem; line-height:1.6; }
+#map { width:100%; height:400px; border-radius:8px; background:#21262d; z-index:1; }
 
 /* Filters */
 .filter-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px; }
@@ -149,16 +147,7 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
   <!-- Map -->
   <div class="card">
     <h2>지도 <span style="font-size:0.7rem; color:#484f58; font-weight:normal; margin-left:8px;">지도를 클릭하여 위치를 직접 선택할 수 있습니다</span></h2>
-    <div id="map">
-      {% if kakao_js_key %}
-        지도 로딩 중...
-      {% else %}
-        <div class="no-map-msg">
-          Kakao API 키를 설정하면 지도가 표시됩니다.<br>
-          현재는 직접 지역 선택 방식으로 이용 가능합니다.
-        </div>
-      {% endif %}
-    </div>
+    <div id="map"></div>
   </div>
 
   <!-- Filters -->
@@ -402,37 +391,29 @@ function showRecentDropdown() {
 
 // ── Init ───────────────────────────────────────────────────────
 let map, marker, circle, searchMarkers = [];
-const hasKakao = typeof kakao !== 'undefined' && kakao.maps;
 
 document.addEventListener('DOMContentLoaded', () => {
-  if (hasKakao) {
-    kakao.maps.load(() => {
-      map = new kakao.maps.Map(document.getElementById('map'), {
-        center: new kakao.maps.LatLng(37.5665, 126.9780),
-        level: 5,
-      });
-      // 지도 클릭 → 위치 선택
-      kakao.maps.event.addListener(map, 'click', async (mouseEvent) => {
-        const latlng = mouseEvent.latLng;
-        const lat = latlng.getLat();
-        const lng = latlng.getLng();
-        // 역지오코딩으로 주소 가져오기
-        const geocoder = new kakao.maps.services.Geocoder();
-        geocoder.coord2Address(lng, lat, (result, status) => {
-          let name = '선택한 위치';
-          let address = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-          if (status === kakao.maps.services.Status.OK && result[0]) {
-            address = result[0].address?.address_name || address;
-            name = result[0].address?.region_3depth_name || name;
-          }
-          selectLocation({ name, address, lat, lng });
-        });
-      });
-    });
-    document.getElementById('directSelect').classList.add('hidden');
-  } else {
-    loadRegions();
-  }
+  map = L.map('map').setView([37.5665, 126.9780], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19,
+  }).addTo(map);
+
+  // 지도 클릭 → 위치 선택 (역지오코딩은 서버 Kakao REST API 사용)
+  map.on('click', async (e) => {
+    const lat = e.latlng.lat;
+    const lng = e.latlng.lng;
+    let name = '선택한 위치';
+    let address = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    try {
+      const res = await fetch(`/api/reverse_geo?lat=${lat}&lng=${lng}`);
+      const data = await res.json();
+      if (data.address) { address = data.address; name = data.name || name; }
+    } catch {}
+    selectLocation({ name, address, lat, lng });
+  });
+
+  document.getElementById('directSelect').classList.add('hidden');
   bindEvents();
 });
 
@@ -516,7 +497,7 @@ async function doSearch() {
 }
 
 function clearSearchMarkers() {
-  searchMarkers.forEach(m => m.setMap(null));
+  searchMarkers.forEach(m => map.removeLayer(m));
   searchMarkers = [];
 }
 
@@ -531,32 +512,29 @@ function showSearchResults(results) {
     return;
   }
 
-  const bounds = hasKakao && map ? new kakao.maps.LatLngBounds() : null;
+  const bounds = [];
 
   results.forEach((r, i) => {
     const li = document.createElement('li');
     li.innerHTML = `<div><span style="color:#58a6ff;margin-right:6px;">${i+1}</span>${r.name}</div><div class="addr">${r.address}</div>`;
     li.addEventListener('click', () => { clearSearchMarkers(); selectLocation(r); });
-    li.addEventListener('mouseenter', () => { if (hasKakao && searchMarkers[i]) searchMarkers[i].setZIndex(10); });
     ul.appendChild(li);
 
-    // 지도에 번호 마커 표시
-    if (hasKakao && map && r.lat && r.lng) {
-      const pos = new kakao.maps.LatLng(r.lat, r.lng);
-      bounds.extend(pos);
-      const content = `<div style="background:#58a6ff;color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);cursor:pointer;">${i+1}</div>`;
-      const overlay = new kakao.maps.CustomOverlay({ position: pos, content, map, yAnchor: 1 });
-      kakao.maps.event.addListener(overlay, 'click', () => { clearSearchMarkers(); selectLocation(r); });
-      // 클릭 가능하게 별도 마커 추가
-      const clickMarker = new kakao.maps.Marker({ position: pos, map, opacity: 0 });
-      kakao.maps.event.addListener(clickMarker, 'click', () => { clearSearchMarkers(); selectLocation(r); });
-      searchMarkers.push(overlay, clickMarker);
+    if (map && r.lat && r.lng) {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="background:#58a6ff;color:#fff;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);">${i+1}</div>`,
+        iconSize: [26, 26], iconAnchor: [13, 13],
+      });
+      const m = L.marker([r.lat, r.lng], { icon }).addTo(map);
+      m.on('click', () => { clearSearchMarkers(); selectLocation(r); });
+      searchMarkers.push(m);
+      bounds.push([r.lat, r.lng]);
     }
   });
 
-  // 모든 검색 결과가 보이도록 지도 범위 조정
-  if (bounds && searchMarkers.length > 0) {
-    map.setBounds(bounds, 80);
+  if (bounds.length > 0) {
+    map.fitBounds(bounds, { padding: [40, 40] });
   }
 }
 
@@ -574,28 +552,23 @@ function selectLocation(loc) {
   document.getElementById('locAddr').textContent = loc.address;
   document.getElementById('fetchBtn').disabled = false;
 
-  if (hasKakao && map) {
+  if (map) {
     clearSearchMarkers();
-    const pos = new kakao.maps.LatLng(loc.lat, loc.lng);
-    map.setCenter(pos);
-    map.setLevel(5);
-    if (marker) marker.setMap(null);
-    marker = new kakao.maps.Marker({ position: pos, map });
+    map.setView([loc.lat, loc.lng], 14);
+    if (marker) map.removeLayer(marker);
+    marker = L.marker([loc.lat, loc.lng]).addTo(map);
     updateCircle();
   }
 }
 
 function updateCircle() {
-  if (!hasKakao || !map) return;
+  if (!map) return;
   const radius = parseFloat(document.getElementById('filterRadius').value) * 1000;
-  if (circle) circle.setMap(null);
-  circle = new kakao.maps.Circle({
-    center: new kakao.maps.LatLng(S.lat, S.lng),
-    radius,
-    strokeWeight: 2, strokeColor: '#58a6ff', strokeOpacity: 0.8,
+  if (circle) map.removeLayer(circle);
+  circle = L.circle([S.lat, S.lng], {
+    radius, color: '#58a6ff', weight: 2, opacity: 0.8,
     fillColor: '#58a6ff', fillOpacity: 0.12,
-  });
-  circle.setMap(map);
+  }).addTo(map);
 }
 
 // ── Fetch data ─────────────────────────────────────────────────
@@ -622,14 +595,14 @@ async function fetchRentData() {
       `${data.region?.sido} ${data.region?.sigungu} (${data.region?.code})`;
 
     // 동 좌표를 지도에 표시
-    if (hasKakao && map && data.dong_coords) {
+    if (map && data.dong_coords) {
       Object.entries(data.dong_coords).forEach(([dong, coord]) => {
-        const pos = new kakao.maps.LatLng(coord.lat, coord.lng);
-        const label = new kakao.maps.CustomOverlay({
-          position: pos, map,
-          content: `<div style="background:#161b22;color:#58a6ff;padding:3px 8px;border-radius:4px;font-size:11px;border:1px solid #30363d;">${dong}</div>`,
-          yAnchor: 1.5,
+        const icon = L.divIcon({
+          className: '',
+          html: `<div style="background:#161b22;color:#58a6ff;padding:3px 8px;border-radius:4px;font-size:11px;border:1px solid #30363d;white-space:nowrap;">${dong}</div>`,
+          iconAnchor: [0, 0],
         });
+        L.marker([coord.lat, coord.lng], { icon, interactive: false }).addTo(map);
       });
     }
 

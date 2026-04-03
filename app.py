@@ -487,6 +487,20 @@ def api_rent_direct():
     return jsonify({"data": all_data, "stats": stats, "total": len(all_data)})
 
 
+@app.route("/api/reverse_geo")
+def api_reverse_geo():
+    lat = req.args.get("lat", "")
+    lng = req.args.get("lng", "")
+    if not lat or not lng:
+        return jsonify({"error": "좌표 필요"}), 400
+    region = kakao_coord2region(lng, lat)
+    if region:
+        addr = region.get("address_name", f"{lat}, {lng}")
+        name = region.get("region_3depth_name", "선택한 위치")
+        return jsonify({"address": addr, "name": name})
+    return jsonify({"address": f"{lat}, {lng}", "name": "선택한 위치"})
+
+
 @app.route("/api/regions")
 def api_regions():
     return jsonify(REGION_CODES)
