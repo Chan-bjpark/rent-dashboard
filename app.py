@@ -179,7 +179,7 @@ def fetch_molit(ptype, region_code, deal_ym):
                     "pageNo": 1,
                 },
                 headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15,
+                timeout=8,
             )
             r.raise_for_status()
             return parse_xml(r.text, api)
@@ -339,7 +339,7 @@ def api_rent():
     lng = float(req.args.get("lng", 0))
     radius = float(req.args.get("radius", 1.0))
     ptypes = req.args.get("types", "officetel,multi_family").split(",")
-    months = int(req.args.get("months", 6))
+    months = int(req.args.get("months", 3))
 
     if not lat or not lng:
         return jsonify({"error": "좌표가 필요합니다"}), 400
@@ -353,17 +353,18 @@ def api_rent():
     sido = region.get("region_1depth_name", "")
     sigungu = region.get("region_2depth_name", "")
 
-    # 인접 시군구 체크 (반경 경계) — 병렬
+    # 인접 시군구 체크 (반경 경계) — 반경 0.5km 이하면 스킵
     codes = {code}
-    def _check_bearing(bearing):
-        dlat = radius / 111.0 * math.cos(math.radians(bearing))
-        dlng = radius / (111.0 * math.cos(math.radians(lat))) * math.sin(math.radians(bearing))
-        return kakao_coord2region(lng + dlng, lat + dlat)
+    if radius > 0.5:
+        def _check_bearing(bearing):
+            dlat = radius / 111.0 * math.cos(math.radians(bearing))
+            dlng = radius / (111.0 * math.cos(math.radians(lat))) * math.sin(math.radians(bearing))
+            return kakao_coord2region(lng + dlng, lat + dlat)
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for br in ex.map(_check_bearing, [0, 90, 180, 270]):
-            if br:
-                codes.add(br.get("code", "")[:5])
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for br in ex.map(_check_bearing, [0, 90, 180, 270]):
+                if br:
+                    codes.add(br.get("code", "")[:5])
     codes.discard("")
 
     # 2) 최근 N개월
@@ -389,18 +390,30 @@ def api_rent():
         for f in as_completed(futures):
             all_data.extend(f.result())
 
-    # 4) 법정동별 좌표 → 거리 필터 — 병렬
+    # 4) 법정동별 좌표 → 거리 필터
+    # 캐시에 있는 동만 즉시 사용, 나머지는 최대 6개까지만 지오코딩
     dong_coords = {}
     unique_dongs = {d["dong"] for d in all_data if d["dong"]}
+    uncached_dongs = []
 
-    def _geo_dong(dong):
-        coords = geocode_dong(sido, sigungu, dong)
-        return dong, coords
+    for dong in unique_dongs:
+        key = f"geo:{sido}:{sigungu}:{dong}"
+        if key in _cache and time.time() - _cache[key]["t"] < CACHE_TTL:
+            if _cache[key]["v"]:
+                dong_coords[dong] = _cache[key]["v"]
+        else:
+            uncached_dongs.append(dong)
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for dong, coords in ex.map(_geo_dong, unique_dongs):
-            if coords:
-                dong_coords[dong] = coords
+    # 캐시 미스 동은 최대 6개만 지오코딩 (타임아웃 방지)
+    if uncached_dongs:
+        def _geo_dong(dong):
+            coords = geocode_dong(sido, sigungu, dong)
+            return dong, coords
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for dong, coords in ex.map(_geo_dong, uncached_dongs[:6]):
+                if coords:
+                    dong_coords[dong] = coords
 
     filtered = []
     for rec in all_data:
