@@ -284,6 +284,14 @@ header p { color:#484f58; font-size:0.85rem; margin-top:4px; }
       </div>
     </div>
 
+    <div class="card">
+      <h2>보증금 분포 차트</h2>
+      <div class="chart-wrap">
+        <div class="chart-box"><canvas id="chartDepUnder30"></canvas></div>
+        <div class="chart-box"><canvas id="chartDepOver30"></canvas></div>
+      </div>
+    </div>
+
     <!-- Breakdown -->
     <div class="card">
       <h2>조건별 시세 비교</h2>
@@ -793,6 +801,39 @@ function renderCharts(data) {
 
   makeChart('chartUnder30', '30㎡ 미만 월세 분포 (만원)', under30, 'rgba(88,166,255,0.6)', '#58a6ff');
   makeChart('chartOver30', '30㎡ 이상 월세 분포 (만원)', over30, 'rgba(188,140,255,0.6)', '#bc8cff');
+
+  // 보증금 분포 차트
+  const depUnder30 = data.filter(d => d.area < 30).map(d => d.deposit);
+  const depOver30 = data.filter(d => d.area >= 30).map(d => d.deposit);
+
+  function buildDepHist(deps) {
+    if (!deps.length) return { labels: [], values: [] };
+    const maxD = Math.max(...deps);
+    const binSize = maxD > 50000 ? 5000 : maxD > 10000 ? 2000 : maxD > 5000 ? 1000 : 500;
+    const binsMap = {};
+    deps.forEach(d => { const b = Math.floor(d / binSize) * binSize; binsMap[b] = (binsMap[b] || 0) + 1; });
+    const keys = Object.keys(binsMap).map(Number).sort((a,b) => a - b);
+    return { labels: keys.map(k => `${(k/1000).toFixed(0)}~${((k+binSize)/1000).toFixed(0)}천`), values: keys.map(k => binsMap[k]) };
+  }
+
+  function makeDepChart(canvasId, title, deps, color, borderColor) {
+    const h = buildDepHist(deps);
+    if (!h.labels.length) return;
+    S.charts[canvasId] = new Chart(document.getElementById(canvasId), {
+      type: 'bar',
+      data: { labels: h.labels, datasets: [{ label: '건수', data: h.values,
+        backgroundColor: color, borderColor: borderColor, borderWidth: 1 }] },
+      options: {
+        responsive: true,
+        plugins: { title: { display: true, text: `${title} (${deps.length}건)`, color: '#8b949e' }, legend: { display: false } },
+        scales: { x: { ticks: { color: '#484f58', maxRotation: 45 }, grid: { color: '#21262d' } },
+                 y: { ticks: { color: '#484f58' }, grid: { color: '#21262d' } } },
+      },
+    });
+  }
+
+  makeDepChart('chartDepUnder30', '30㎡ 미만 보증금 분포 (만원)', depUnder30, 'rgba(63,185,80,0.6)', '#3fb950');
+  makeDepChart('chartDepOver30', '30㎡ 이상 보증금 분포 (만원)', depOver30, 'rgba(210,153,34,0.6)', '#d29922');
 }
 
 // ── Breakdowns ─────────────────────────────────────────────────
@@ -893,6 +934,19 @@ function showLoading(show) {
 }
 
 // ── Export functions ──────────────────────────────────────────────
+function makeFileName(ext) {
+  // 동이름: 가장 많이 나오는 동
+  const dongCounts = {};
+  S.filtered.forEach(d => { if (d.dong) dongCounts[d.dong] = (dongCounts[d.dong] || 0) + 1; });
+  const topDong = Object.entries(dongCounts).sort((a,b) => b[1] - a[1])[0]?.[0] || S.name || '전체';
+  // 건물유형: 선택된 유형
+  const types = [...document.querySelectorAll('.ptype-check:checked')].map(c => c.parentElement.textContent.trim()).join('+') || '전체';
+  // 날짜
+  const now = new Date();
+  const date = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}`;
+  return `${topDong}_${types}_${date}_시세.${ext}`;
+}
+
 function gatherBreakdowns() {
   const monthly = S.filtered.filter(d => d.monthly_rent > 0);
 
@@ -933,7 +987,19 @@ function gatherBreakdowns() {
       return '초고층(21+)';
     }),
     by_dong: breakdownRows(monthly, d => d.dong || '미상'),
+    dep_under30_hist: buildDepositHist(S.filtered.filter(d => d.area < 30).map(d => d.deposit)),
+    dep_over30_hist: buildDepositHist(S.filtered.filter(d => d.area >= 30).map(d => d.deposit)),
   };
+}
+
+function buildDepositHist(deps) {
+  if (!deps.length) return { labels: [], values: [] };
+  const maxD = Math.max(...deps);
+  const binSize = maxD > 50000 ? 5000 : maxD > 10000 ? 2000 : maxD > 5000 ? 1000 : 500;
+  const binsMap = {};
+  deps.forEach(d => { const b = Math.floor(d / binSize) * binSize; binsMap[b] = (binsMap[b] || 0) + 1; });
+  const keys = Object.keys(binsMap).map(Number).sort((a,b) => a - b);
+  return { labels: keys.map(k => `${(k/1000).toFixed(0)}~${((k+binSize)/1000).toFixed(0)}천`), values: keys.map(k => binsMap[k]) };
 }
 
 async function exportSlides() {
@@ -957,7 +1023,7 @@ async function exportSlides() {
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
-    a.download = resp.headers.get('content-disposition')?.match(/filename="?(.+?)"?$/)?.[1] || '월세시세보고서.pptx';
+    a.download = makeFileName('pptx');
     a.click(); URL.revokeObjectURL(url);
   } catch (e) { alert('슬라이드 생성 오류: ' + e.message); }
   finally { btn.disabled = false; btn.textContent = '📊 구글 슬라이드 받기 (.pptx)'; }
@@ -976,7 +1042,7 @@ async function exportExcel() {
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
-    a.download = resp.headers.get('content-disposition')?.match(/filename="?(.+?)"?$/)?.[1] || '거래내역.xlsx';
+    a.download = makeFileName('xlsx');
     a.click(); URL.revokeObjectURL(url);
   } catch (e) { alert('엑셀 생성 오류: ' + e.message); }
   finally { btn.disabled = false; btn.textContent = '📥 엑셀 받기'; }

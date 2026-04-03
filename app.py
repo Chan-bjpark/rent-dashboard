@@ -726,6 +726,33 @@ def export_slides():
         chart.chart_title.text_frame.paragraphs[0].font.size = Pt(11)
         chart.chart_title.text_frame.paragraphs[0].font.color.rgb = DARK
 
+    # ── Slide 3-2: 보증금 분포 차트 ──
+    sl = prs.slides.add_slide(blank)
+    _add_header_bar(sl, "보증금 분포 차트")
+
+    for ci, (chart_label, chart_data) in enumerate([
+        ("30㎡ 미만 보증금 분포", breakdowns.get("dep_under30_hist", {})),
+        ("30㎡ 이상 보증금 분포", breakdowns.get("dep_over30_hist", {})),
+    ]):
+        labels = chart_data.get("labels", [])
+        values = chart_data.get("values", [])
+        if not labels:
+            continue
+        chart_d = slide_chart_data(labels, values)
+        left = Inches(0.5 + ci * 6.3)
+        x, y, cx, cy = left, Inches(1.2), Inches(5.8), Inches(5.5)
+        chart_frame = sl.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_d)
+        chart = chart_frame.chart
+        chart.has_legend = False
+        plot = chart.plots[0]
+        series = plot.series[0]
+        series.format.fill.solid()
+        series.format.fill.fore_color.rgb = GREEN if ci == 0 else RGBColor(0xD2, 0x99, 0x22)
+        chart.chart_title.has_text_frame = True
+        chart.chart_title.text_frame.paragraphs[0].text = f"{chart_label} (만원)"
+        chart.chart_title.text_frame.paragraphs[0].font.size = Pt(11)
+        chart.chart_title.text_frame.paragraphs[0].font.color.rgb = DARK
+
     # ── Slide 4: 조건별 시세 비교 ──
     sl = prs.slides.add_slide(blank)
     _add_header_bar(sl, "조건별 시세 비교")
