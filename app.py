@@ -2,7 +2,7 @@
 """월세 시세 분석 대시보드 — 국토부 실거래가 기반"""
 
 import io
-import os, math, json, time, re
+import os, math, json, time, re, uuid, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import xml.etree.ElementTree as ET
@@ -69,6 +69,18 @@ def cached(key, fn):
     val = fn()
     _cache[key] = {"v": val, "t": now}
     return val
+
+
+# ── Job Store (비동기 작업) ───────────────────────────────────────
+_jobs = {}
+JOB_TTL = 300  # 5분 후 자동 삭제
+
+
+def _cleanup_jobs():
+    now = time.time()
+    expired = [k for k, v in _jobs.items() if now - v.get("created", 0) > JOB_TTL]
+    for k in expired:
+        del _jobs[k]
 
 
 # ── Utility ───────────────────────────────────────────────────────
@@ -333,6 +345,119 @@ def api_search():
     return jsonify({"results": results})
 
 
+def _run_rent_job(job_id, lat, lng, radius, ptypes, months):
+    """백그라운드에서 실거래가 조회 수행"""
+    job = _jobs[job_id]
+    try:
+        job["status"] = "geocoding"
+
+        # 1) 좌표 → 시군구 코드
+        region = kakao_coord2region(lng, lat)
+        if not region:
+            job["status"] = "error"
+            job["error"] = "지역 정보를 찾을 수 없습니다"
+            return
+
+        code = region.get("code", "")[:5]
+        sido = region.get("region_1depth_name", "")
+        sigungu = region.get("region_2depth_name", "")
+        job["region"] = {"code": code, "sido": sido, "sigungu": sigungu}
+
+        # 인접 시군구 체크
+        codes = {code}
+        if radius > 0.5:
+            def _check_bearing(bearing):
+                dlat = radius / 111.0 * math.cos(math.radians(bearing))
+                dlng = radius / (111.0 * math.cos(math.radians(lat))) * math.sin(math.radians(bearing))
+                return kakao_coord2region(lng + dlng, lat + dlat)
+
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                for br in ex.map(_check_bearing, [0, 90, 180, 270]):
+                    if br:
+                        codes.add(br.get("code", "")[:5])
+        codes.discard("")
+
+        # 2) 최근 N개월
+        yms = set()
+        now = datetime.now()
+        for i in range(months):
+            dt = now - timedelta(days=30 * i)
+            yms.add(dt.strftime("%Y%m"))
+
+        # 3) API 호출 — 병렬
+        job["status"] = "fetching"
+        tasks = []
+        for c in codes:
+            for pt in ptypes:
+                pt = pt.strip()
+                if pt not in MOLIT:
+                    continue
+                for ym in sorted(yms, reverse=True):
+                    tasks.append((pt, c, ym))
+
+        job["total_tasks"] = len(tasks)
+        job["done_tasks"] = 0
+
+        all_data = []
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(fetch_molit, pt, c, ym): (pt, c, ym) for pt, c, ym in tasks}
+            for f in as_completed(futures):
+                all_data.extend(f.result())
+                job["done_tasks"] += 1
+
+        # 4) 법정동별 좌표 → 거리 필터
+        job["status"] = "filtering"
+        dong_coords = {}
+        unique_dongs = {d["dong"] for d in all_data if d["dong"]}
+
+        for dong in unique_dongs:
+            key = f"geo:{sido}:{sigungu}:{dong}"
+            if key in _cache and time.time() - _cache[key]["t"] < CACHE_TTL:
+                if _cache[key]["v"]:
+                    dong_coords[dong] = _cache[key]["v"]
+
+        uncached = [d for d in unique_dongs if d not in dong_coords]
+        if uncached:
+            def _geo_dong(dong):
+                return dong, geocode_dong(sido, sigungu, dong)
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                for dong, coords in ex.map(_geo_dong, uncached[:8]):
+                    if coords:
+                        dong_coords[dong] = coords
+
+        filtered = []
+        for rec in all_data:
+            d = rec["dong"]
+            if d in dong_coords:
+                c = dong_coords[d]
+                dist = haversine(lat, lng, c["lat"], c["lng"])
+                rec["distance"] = round(dist, 2)
+                rec["dong_lat"] = c["lat"]
+                rec["dong_lng"] = c["lng"]
+                if dist <= radius:
+                    filtered.append(rec)
+            else:
+                rec["distance"] = None
+                rec["dong_lat"] = None
+                rec["dong_lng"] = None
+                filtered.append(rec)
+
+        stats = calc_stats(filtered)
+
+        job["status"] = "done"
+        job["result"] = {
+            "data": filtered,
+            "stats": stats,
+            "region": job["region"],
+            "dong_coords": dong_coords,
+            "total": len(filtered),
+        }
+    except Exception as e:
+        print(f"Job {job_id} error: {e}")
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
 @app.route("/api/rent")
 def api_rent():
     lat = float(req.args.get("lat", 0))
@@ -344,105 +469,37 @@ def api_rent():
     if not lat or not lng:
         return jsonify({"error": "좌표가 필요합니다"}), 400
 
-    # 1) 좌표 → 시군구 코드
-    region = kakao_coord2region(lng, lat)
-    if not region:
-        return jsonify({"error": "지역 정보를 찾을 수 없습니다"}), 404
+    _cleanup_jobs()
 
-    code = region.get("code", "")[:5]
-    sido = region.get("region_1depth_name", "")
-    sigungu = region.get("region_2depth_name", "")
+    job_id = str(uuid.uuid4())[:8]
+    _jobs[job_id] = {"status": "started", "created": time.time()}
 
-    # 인접 시군구 체크 (반경 경계) — 반경 0.5km 이하면 스킵
-    codes = {code}
-    if radius > 0.5:
-        def _check_bearing(bearing):
-            dlat = radius / 111.0 * math.cos(math.radians(bearing))
-            dlng = radius / (111.0 * math.cos(math.radians(lat))) * math.sin(math.radians(bearing))
-            return kakao_coord2region(lng + dlng, lat + dlat)
+    t = threading.Thread(target=_run_rent_job, args=(job_id, lat, lng, radius, ptypes, months), daemon=True)
+    t.start()
 
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for br in ex.map(_check_bearing, [0, 90, 180, 270]):
-                if br:
-                    codes.add(br.get("code", "")[:5])
-    codes.discard("")
+    return jsonify({"job_id": job_id, "status": "started"})
 
-    # 2) 최근 N개월
-    yms = set()
-    now = datetime.now()
-    for i in range(months):
-        dt = now - timedelta(days=30 * i)
-        yms.add(dt.strftime("%Y%m"))
 
-    # 3) API 호출 — 병렬
-    tasks = []
-    for c in codes:
-        for pt in ptypes:
-            pt = pt.strip()
-            if pt not in MOLIT:
-                continue
-            for ym in sorted(yms, reverse=True):
-                tasks.append((pt, c, ym))
+@app.route("/api/rent/status/<job_id>")
+def api_rent_status(job_id):
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "작업을 찾을 수 없습니다"}), 404
 
-    all_data = []
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(fetch_molit, pt, c, ym) for pt, c, ym in tasks]
-        for f in as_completed(futures):
-            all_data.extend(f.result())
+    if job["status"] == "done":
+        result = job["result"]
+        del _jobs[job_id]
+        return jsonify(result)
 
-    # 4) 법정동별 좌표 → 거리 필터
-    # 캐시에 있는 동만 즉시 사용, 나머지는 최대 6개까지만 지오코딩
-    dong_coords = {}
-    unique_dongs = {d["dong"] for d in all_data if d["dong"]}
-    uncached_dongs = []
+    if job["status"] == "error":
+        error = job.get("error", "알 수 없는 오류")
+        del _jobs[job_id]
+        return jsonify({"error": error}), 500
 
-    for dong in unique_dongs:
-        key = f"geo:{sido}:{sigungu}:{dong}"
-        if key in _cache and time.time() - _cache[key]["t"] < CACHE_TTL:
-            if _cache[key]["v"]:
-                dong_coords[dong] = _cache[key]["v"]
-        else:
-            uncached_dongs.append(dong)
-
-    # 캐시 미스 동은 최대 6개만 지오코딩 (타임아웃 방지)
-    if uncached_dongs:
-        def _geo_dong(dong):
-            coords = geocode_dong(sido, sigungu, dong)
-            return dong, coords
-
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for dong, coords in ex.map(_geo_dong, uncached_dongs[:6]):
-                if coords:
-                    dong_coords[dong] = coords
-
-    filtered = []
-    for rec in all_data:
-        d = rec["dong"]
-        if d in dong_coords:
-            c = dong_coords[d]
-            dist = haversine(lat, lng, c["lat"], c["lng"])
-            rec["distance"] = round(dist, 2)
-            rec["dong_lat"] = c["lat"]
-            rec["dong_lng"] = c["lng"]
-            if dist <= radius:
-                filtered.append(rec)
-        else:
-            rec["distance"] = None
-            rec["dong_lat"] = None
-            rec["dong_lng"] = None
-            filtered.append(rec)
-
-    stats = calc_stats(filtered)
-
-    return jsonify(
-        {
-            "data": filtered,
-            "stats": stats,
-            "region": {"code": code, "sido": sido, "sigungu": sigungu},
-            "dong_coords": dong_coords,
-            "total": len(filtered),
-        }
-    )
+    return jsonify({
+        "status": job["status"],
+        "progress": f"{job.get('done_tasks', 0)}/{job.get('total_tasks', '?')}",
+    })
 
 
 # ── 시군구 코드 직접 조회 (Kakao 없을 때 fallback) ────────────────

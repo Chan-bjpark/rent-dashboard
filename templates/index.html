@@ -622,69 +622,87 @@ function updateCircle() {
   }).addTo(map);
 }
 
-// ── Fetch data ─────────────────────────────────────────────────
+// ── Fetch data (폴링 방식) ──────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+const STATUS_MSG = {
+  started: '작업 시작 중...',
+  geocoding: '지역 정보 조회 중...',
+  fetching: '실거래가 데이터 수집 중...',
+  filtering: '거리 필터링 중...',
+};
+
 async function fetchRentData() {
   const types = [...document.querySelectorAll('.ptype-check:checked')].map(c => c.value).join(',');
-  let months = parseInt(document.getElementById('filterMonths').value);
-  let radius = parseFloat(document.getElementById('filterRadius').value);
+  const months = parseInt(document.getElementById('filterMonths').value);
+  const radius = parseFloat(document.getElementById('filterRadius').value);
 
   if (!S.lat || !S.lng) return alert('위치를 먼저 선택하세요');
 
   showLoading(true);
   updateCircle();
 
-  // 재시도 전략: 타임아웃 시 파라미터를 축소하여 재시도
-  const attempts = [
-    { months, radius },
-    { months: Math.min(months, 2), radius: Math.min(radius, 0.5) },
-    { months: 1, radius: 0.3 },
-  ];
+  try {
+    // 1) 작업 시작 요청 (즉시 반환)
+    const url = `/api/rent?lat=${S.lat}&lng=${S.lng}&types=${types}&months=${months}&radius=${radius}`;
+    const startRes = await safeFetchJson(url);
 
-  let lastError = null;
-  for (let i = 0; i < attempts.length; i++) {
-    const p = attempts[i];
-    try {
-      if (i > 0) {
-        document.querySelector('.loading p').textContent =
-          `재시도 중... (${p.months}개월, 반경 ${p.radius}km)`;
-      }
-      const url = `/api/rent?lat=${S.lat}&lng=${S.lng}&types=${types}&months=${p.months}&radius=${p.radius}`;
-      const data = await safeFetchJson(url);
-
-      S.rawData = data.data || [];
-      S.stats = data.stats || {};
-      document.getElementById('locRegion').textContent =
-        `${data.region?.sido} ${data.region?.sigungu} (${data.region?.code})`;
-
-      // 동 좌표를 지도에 표시
-      if (map && data.dong_coords) {
-        Object.entries(data.dong_coords).forEach(([dong, coord]) => {
-          const icon = L.divIcon({
-            className: '',
-            html: `<div style="background:#161b22;color:#58a6ff;padding:3px 8px;border-radius:4px;font-size:11px;border:1px solid #30363d;white-space:nowrap;">${dong}</div>`,
-            iconAnchor: [0, 0],
-          });
-          L.marker([coord.lat, coord.lng], { icon, interactive: false }).addTo(map);
-        });
-      }
-
-      applyLocalFilters();
-      const note = i > 0 ? ` (${p.months}개월, ${p.radius}km 범위로 조회됨)` : '';
-      document.getElementById('lastUpdate').textContent = '조회: ' + new Date().toLocaleString('ko-KR') + note;
-      showLoading(false);
+    if (!startRes.job_id) {
+      // 이전 방식 호환 (job_id 없이 바로 결과가 온 경우)
+      handleRentResult(startRes);
       return;
-    } catch (e) {
-      lastError = e;
-      if (e.message !== 'TIMEOUT' || i === attempts.length - 1) break;
-      console.warn(`Attempt ${i+1} timed out, retrying with reduced params...`);
     }
+
+    // 2) 폴링으로 결과 대기
+    const jobId = startRes.job_id;
+    const maxWait = 120000; // 최대 2분
+    const start = Date.now();
+
+    while (Date.now() - start < maxWait) {
+      await sleep(2000);
+      const statusRes = await safeFetchJson(`/api/rent/status/${jobId}`);
+
+      // 완료: data 필드가 있으면 결과
+      if (statusRes.data !== undefined) {
+        handleRentResult(statusRes);
+        return;
+      }
+
+      // 진행 중: 상태 표시 업데이트
+      const msg = STATUS_MSG[statusRes.status] || '처리 중...';
+      const progress = statusRes.progress ? ` (${statusRes.progress})` : '';
+      document.querySelector('.loading p').textContent = msg + progress;
+    }
+
+    throw new Error('조회 시간이 초과되었습니다. 조건을 줄여 다시 시도해주세요.');
+  } catch (e) {
+    alert('조회 오류: ' + e.message);
+  } finally {
+    showLoading(false);
   }
+}
+
+function handleRentResult(data) {
+  S.rawData = data.data || [];
+  S.stats = data.stats || {};
+  document.getElementById('locRegion').textContent =
+    `${data.region?.sido} ${data.region?.sigungu} (${data.region?.code})`;
+
+  // 동 좌표를 지도에 표시
+  if (map && data.dong_coords) {
+    Object.entries(data.dong_coords).forEach(([dong, coord]) => {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="background:#161b22;color:#58a6ff;padding:3px 8px;border-radius:4px;font-size:11px;border:1px solid #30363d;white-space:nowrap;">${dong}</div>`,
+        iconAnchor: [0, 0],
+      });
+      L.marker([coord.lat, coord.lng], { icon, interactive: false }).addTo(map);
+    });
+  }
+
+  applyLocalFilters();
+  document.getElementById('lastUpdate').textContent = '조회: ' + new Date().toLocaleString('ko-KR');
   showLoading(false);
-  if (lastError?.message === 'TIMEOUT') {
-    alert('서버 응답 시간이 초과되었습니다. 조회 개월수를 줄이거나 건물유형을 하나만 선택해 주세요.');
-  } else {
-    alert('조회 오류: ' + (lastError?.message || '알 수 없는 오류'));
-  }
 }
 
 // Direct region fetch (no Kakao)
